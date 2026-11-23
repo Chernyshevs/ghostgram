@@ -1,0 +1,89 @@
+name: Ghostgram unsigned IPA
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: xcode-27
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - name: Select pinned Xcode and fetch the recorded submodules
+        shell: bash
+        run: |
+          set -euo pipefail
+          version=$(python3 -c "import json; print(json.load(open('versions.json'))['xcode'])")
+          sudo xcode-select -s "/Applications/Xcode_${version}.app/Contents/Developer"
+          xcodebuild -version
+          test "$(uname -m)" = arm64
+          git submodule update --init --recursive --depth=1 --jobs=4
+          git submodule status --recursive > "$RUNNER_TEMP/gitlinks.txt"
+          if grep -E '^[-+U]' "$RUNNER_TEMP/gitlinks.txt"; then exit 1; fi
+          if ! xcrun -sdk iphoneos metal --version; then
+            xcodebuild -downloadComponent MetalToolchain
+            xcrun -sdk iphoneos metal --version
+          fi
+          df -h .
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version-file: Ghostgram/Features/Vless/Core/go/go.mod
+          cache: false
+      - name: Verify pinned Go modules and prepare artifact encryption
+        shell: bash
+        env:
+          RECIPIENT: ${{ vars.IPA_AGE_RECIPIENT }}
+        run: |
+          set -euo pipefail
+          command -v age >/dev/null || brew install age
+          printf '' | age -r "$RECIPIENT" >/dev/null
+          cd Ghostgram/Features/Vless/Core/go
+          go mod download
+          go mod verify
+          git diff --exit-code -- go.mod go.sum
+      - name: Configure Telegram
+        env:
+          API_ID: ${{ secrets.TELEGRAM_API_ID }}
+          API_HASH: ${{ secrets.TELEGRAM_API_HASH }}
+        shell: python3 {0}
+        run: |
+          import json, os, re
+          from pathlib import Path
+          api_id, api_hash = os.environ['API_ID'], os.environ['API_HASH']
+          if not re.fullmatch('[1-9][0-9]{0,9}', api_id) or int(api_id) > 2147483647 or not re.fullmatch('[a-fA-F0-9]{32}', api_hash):
+              raise SystemExit('Configure TELEGRAM_API_ID and TELEGRAM_API_HASH in Actions Secrets')
+          base = Path('build-system')
+          config = json.loads((base / 'ghostgram-configuration.example.json').read_text())
+          config.update(api_id=api_id, api_hash=api_hash, team_id='UNSIGNED00')
+          os.umask(0o077)
+          (base / 'ghostgram-configuration.json').write_text(json.dumps(config))
+      - name: Build and verify unsigned iPhone application
+        shell: bash
+        env:
+          GOFLAGS: -mod=readonly
+        run: |
+          set -euo pipefail
+          build-system/GGBuildRelease.sh --unsigned "$GITHUB_RUN_NUMBER"
+      - name: Hash and encrypt verified IPA
+        shell: bash
+        env:
+          RECIPIENT: ${{ vars.IPA_AGE_RECIPIENT }}
+        run: |
+          set -euo pipefail
+          cd build-output/ipa
+          shasum -a 256 Ghostgram.ipa > Ghostgram.ipa.sha256
+          age -r "$RECIPIENT" -o Ghostgram.ipa.age Ghostgram.ipa
+          cat Ghostgram.ipa.sha256 >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: Ghostgram-unsigned-arm64
+          path: |
+            build-output/ipa/Ghostgram.ipa.age
+            build-output/ipa/Ghostgram.ipa.sha256
+          compression-level: 0
+          if-no-files-found: error
+          retention-days: 7

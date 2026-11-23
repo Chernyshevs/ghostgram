@@ -403,6 +403,8 @@ def clean(bazel, arguments):
 
 
 def resolve_codesigning(arguments, base_path, build_configuration, provisioning_profiles_path, additional_codesigning_output_path) -> ResolvedCodesigningData:
+    if getattr(arguments, 'unsigned', False):
+        return ResolvedCodesigningData(aps_environment='', use_xcode_managed_codesigning=False)
     profile_source = None
     if arguments.gitCodesigningRepository is not None:
         password = os.getenv('TELEGRAM_CODESIGNING_GIT_PASSWORD')
@@ -631,6 +633,14 @@ def build(bazel, arguments):
     )
 
     bazel_command_line.set_configuration(arguments.configuration)
+    if arguments.unsigned:
+        if arguments.configuration != 'release_arm64' or arguments.embedWatchApp:
+            raise ValueError('--unsigned requires release_arm64 without a separately signed Watch app')
+        bazel_command_line.set_disable_provisioning_profiles()
+        bazel_command_line.common_build_args.append('--features=disable_legacy_signing')
+        # Only the device IPA is consumed. Avoid duplicating release symbols on hosted runners.
+        bazel_command_line.configuration_args.remove('--apple_generate_dsym')
+        bazel_command_line.configuration_args.remove('--output_groups=+dsyms')
     if arguments.embedWatchApp:
         if arguments.configuration in ('debug_arm64', 'release_arm64'):
             if arguments.watchApiId is None or arguments.watchApiHash is None:
@@ -809,7 +819,7 @@ def add_vm_lock_arguments(current_parser):
     )
 
 
-def add_codesigning_common_arguments(current_parser: argparse.ArgumentParser):
+def add_codesigning_common_arguments(current_parser: argparse.ArgumentParser, allow_unsigned=False):
     configuration_group = current_parser.add_mutually_exclusive_group(required=True)
     configuration_group.add_argument(
         '--configurationPath',
@@ -821,6 +831,9 @@ def add_codesigning_common_arguments(current_parser: argparse.ArgumentParser):
     )
 
     codesigning_group = current_parser.add_mutually_exclusive_group(required=True)
+    if allow_unsigned:
+        codesigning_group.add_argument('--unsigned', action='store_true',
+                                       help='Build a device IPA for subsequent external signing.')
     codesigning_group.add_argument(
         '--gitCodesigningRepository',
         help='''
@@ -1024,7 +1037,7 @@ if __name__ == '__main__':
         help='Build number.',
         metavar='number'
     )
-    add_project_and_build_common_arguments(buildParser)
+    add_codesigning_common_arguments(buildParser, allow_unsigned=True)
     buildParser.add_argument(
         '--configuration',
         choices=[

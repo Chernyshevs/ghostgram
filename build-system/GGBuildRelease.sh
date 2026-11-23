@@ -2,6 +2,7 @@
 # Build a distribution-signed Ghostgram IPA for TestFlight (release_arm64).
 #
 #   build-system/GGBuildRelease.sh <buildNumber> [extra Make.py args...]
+#   build-system/GGBuildRelease.sh --unsigned <buildNumber>
 #
 # Config:  build-system/ghostgram-configuration.json (gitignored keys, see GGBuild.sh).
 # Signing: build-system/ghostgram-codesigning/{certs,profiles} — App Store distribution
@@ -13,6 +14,19 @@
 
 set -uo pipefail
 cd "$(dirname "$0")/.."
+
+if [[ "${1:-}" == --unsigned ]]; then
+    set -e
+    [[ $# == 2 && "$2" =~ ^[1-9][0-9]*$ ]] || { echo "usage: $0 --unsigned <buildNumber>" >&2; exit 2; }
+    GG_PATCHES_ONLY=1 build-system/GGBuild.sh
+    # Xray is part of the device build even though upstream also supports a core-less client.
+    Ghostgram/Features/Vless/Core/build-core.sh
+    python3 -u build-system/Make/Make.py build --unsigned \
+        --configurationPath build-system/ghostgram-configuration.json \
+        --buildNumber="$2" --configuration=release_arm64
+    python3 build-system/GGUnsignedIPA.py package bazel-bin/Telegram/Telegram.ipa build-output/ipa/Ghostgram.ipa
+    exit 0
+fi
 
 BUILD_NUMBER="${1:-}"
 [ -n "$BUILD_NUMBER" ] || { echo "usage: $0 <buildNumber> [extra Make.py args...]" >&2; exit 2; }
