@@ -24,8 +24,21 @@ def require(condition, message):
 
 
 def macho(stream, path):
-    # Device outputs here are single-slice. Reject other targets even if also labelled arm64.
-    magic, cpu, subtype, kind, count, size, _, _ = struct.unpack('<8I', stream.read(32))
+    header = stream.read(32)
+    # lipo may wrap a single device slice in a universal container.
+    fat = {bytes.fromhex(k): v for k, v in (
+        ('cafebabe', '>5I'), ('bebafeca', '<5I'),
+        ('cafebabf', '>IIQQII'), ('bfbafeca', '<IIQQII'))}
+    if header[:4] in fat:
+        layout = fat[header[:4]]
+        require(struct.unpack_from(layout[0] + 'I', header, 4)[0] == 1, f'{path}: expected only ARM64')
+        stream.seek(8)
+        cpu, subtype, offset, slice_size, *_ = struct.unpack(layout, stream.read(struct.calcsize(layout)))
+        require(cpu == 0x100000c and subtype & 0xffffff == 0 and slice_size >= 32
+                and offset >= 8 + struct.calcsize(layout), f'{path}: invalid ARM64 slice')
+        stream.seek(offset)
+        header = stream.read(32)
+    magic, cpu, subtype, kind, count, size, _, _ = struct.unpack('<8I', header)
     require((magic, cpu, subtype & 0xffffff) == (0xfeedfacf, 0x100000c, 0), f'{path}: expected thin ARM64')
     require(kind in (2, 6, 8) and size <= 8 * 1024 * 1024, f'{path}: invalid Mach-O header')
     data = stream.read(size)
